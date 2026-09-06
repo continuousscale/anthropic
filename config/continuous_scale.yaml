@@ -1,0 +1,481 @@
+# ---------------------------------------------------------------------------
+# csfiler configuration - Continuous Scale LLC
+#
+# This file encodes the BizBox filing system: the naming convention, the closed
+# 13-category taxonomy, the known counterparties, and the routing rules that
+# map a classified document to an exact Drive folder path.
+#
+# Editing this file changes behavior. No naming or routing logic is hardcoded
+# in the Python source.
+# ---------------------------------------------------------------------------
+
+organization:
+  legal_name: "Continuous Scale LLC"
+  short_name: "ContinuousScale"
+  # Former name. Documents predating the change are correct as filed; the agent
+  # flags them rather than "correcting" them.
+  former_names:
+    - name: "Andover Consulting, LLC"
+      aliases: ["Andover Consulting", "Andover"]
+      renamed_on: "2023-01-01"
+      note: >-
+        Rename only - same EIN, same entity. Never rewrite a historical
+        document's subject to the new name. Flag for the name-change register at
+        01 > Name Change & Reinstatement (ACTIVE ISSUE).
+  # Dormant entity, created in error. Documents naming it are quarantined for
+  # review rather than auto-filed.
+  related_entities:
+    - name: "Sara Dickinson Global LLC"
+      status: "dormant-pending-decision"
+      handling: "review"
+
+drive:
+  # Root of the BizBox in Google Drive.
+  root_folder_name: "BizBox — Continuous Scale"
+  # Folders the agent will never write into, even if a rule resolves there.
+  protected_paths:
+    - "12 Archive"
+    - "09 Legal Matters/Legal Holds"
+  # Files already conforming to the convention are skipped, not re-processed.
+  skip_conforming: true
+
+naming:
+  # The convention is an ordered list of fields. Reorder `fields` and the
+  # filename reorders with it; change `separator` and everything rejoins.
+  # Nothing about the convention is hardcoded in the Python source.
+  #
+  # As configured below this produces the BizBox convention:
+  #   2026-08-14_ThirdHorizon_SOW_signed.pdf
+  #   2026-08-31_Mercury_Statement_x4471.pdf
+  #
+  # separator: dash | underscore | period | space
+  separator: "underscore"
+
+  # Words banned outright by the BizBox convention.
+  banned_tokens: ["final", "FINAL", "final2", "finalv2", "latest", "new", "copy", "untitled"]
+  max_filename_length: 120
+
+  # Available fields:
+  #   date       the document's own date          format: strftime
+  #   year       the fiscal period year, which is not always the date's year
+  #   subject    the counterparty, whoever it is
+  #   client     the counterparty, only if it is a configured client
+  #   bank       the counterparty, only if it is a financial institution
+  #   account    the account identifier, redacted   format: "x{last4}"
+  #   doc_type   the descriptor set on the document type
+  #   qualifier  signed / draft / amended
+  #   entity     the name our own business is given on the document
+  #
+  # on_missing: block | skip | placeholder | use_org
+  #   block        refuse to build a name at all
+  #   skip         leave the field out and close the gap
+  #   placeholder  emit `placeholder` so a human can spot what is missing
+  #   use_org      fall back to our own short name
+  fields:
+    - field: date
+      format: "%Y-%m-%d"
+      # A guessed date silently misfiles a document into the wrong year, which
+      # is worse than not filing it. So a missing date blocks the name.
+      on_missing: block
+
+    - field: subject
+      # Governance and IP documents have no counterparty; they take our name.
+      on_missing: use_org
+
+    - field: doc_type
+      on_missing: block
+
+    - field: qualifier
+      on_missing: skip
+
+    - field: account
+      format: "x{last4}"
+      on_missing: skip
+      # Only for documents filed under a specific account, where the last four
+      # digits are what distinguish two otherwise identical statements.
+      account_scoped_only: true
+
+# How much of the work a human sees.
+#   by_confidence  only genuinely uncertain files are queued (recommended)
+#   just_do_it     apply everything the classifier is not actively unsure of
+#   always_ask     queue every proposal, however confident
+review:
+  mode: "by_confidence"
+
+privacy:
+  # Filenames are shown in link previews, notification emails and shared folder
+  # listings. Full identifiers never belong in one.
+  # Account numbers are truncated to the last 4 digits, prefixed with "x".
+  redact_account_numbers: true
+  account_number_style: "x{last4}"
+  # Patterns that must never appear in a generated filename.
+  forbid_in_filename:
+    - name: "ssn"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
+    - name: "ein"
+      pattern: '\b\d{2}-\d{7}\b'
+    - name: "long_digit_run"   # card/account numbers of 7+ digits
+      pattern: '\b\d{7,}\b'
+
+confidence:
+  # Above this, the agent may act without a human looking at it.
+  auto_apply: 0.90
+  # Between review and auto_apply, the proposal is queued for approval.
+  review: 0.60
+  # Below `review` the file is left alone and reported as unidentified.
+
+# ---------------------------------------------------------------------------
+# The closed category list. Never extended - see BizBox rule 1.
+# ---------------------------------------------------------------------------
+categories:
+  "00": "Start Here"
+  "01": "Entity & Governance"
+  "02": "Compliance"
+  "03": "Tax"
+  "04": "Money & Banking"
+  "05": "Clients & Revenue"
+  "06": "People"
+  "07": "Insurance & Risk"
+  "08": "Vendors & Assets"
+  "09": "Legal Matters"
+  "10": "Brand & IP"
+  "11": "Ops & Continuity"
+  "12": "Archive"
+
+# ---------------------------------------------------------------------------
+# Known counterparties. Used to resolve a detected name to a canonical subject
+# token and to the folder that already exists for it.
+# ---------------------------------------------------------------------------
+entities:
+  clients:
+    - subject: "ThirdHorizon"
+      aliases: ["Third Horizon", "Third Horizon Partners", "3rd Horizon"]
+    - subject: "PLTW"
+      aliases: ["Project Lead The Way", "Project Lead the Way", "PLTW Inc"]
+    - subject: "MessageGears"
+      aliases: ["Message Gears", "MessageGears Inc"]
+    - subject: "GoodSkin"
+      aliases: ["GoodSkin Clinics", "Good Skin Clinics", "GoodSkin Clinic"]
+  financial_institutions:
+    - subject: "Mercury"
+      aliases: ["Mercury Bank", "Mercury Technologies", "Choice Financial Group"]
+      kind: "bank"
+      accounts: ["operating", "treasury", "card"]
+    - subject: "BankOfAmerica"
+      aliases: ["Bank of America", "BofA", "BANK OF AMERICA"]
+      kind: "bank"
+    - subject: "Amex"
+      aliases: ["American Express", "AMEX"]
+      kind: "credit_card"
+    - subject: "WellsFargo"
+      aliases: ["Wells Fargo", "Wells Fargo Auto"]
+      kind: "loan"
+      note: "vehicle loan"
+    - subject: "Solera"
+      aliases: ["Solera National Bank", "Solera Plan Services"]
+      kind: "retirement"
+    - subject: "Titan"
+      aliases: ["Titan Invest", "Titan Global Capital"]
+      kind: "retirement"
+  vendors:
+    - subject: "Gusto"
+      aliases: ["Gusto Inc", "ZenPayroll"]
+      kind: "payroll"
+    - subject: "QuickBooks"
+      aliases: ["Intuit", "Intuit QuickBooks", "QBO"]
+      kind: "accounting"
+  agencies:
+    - subject: "WA-DOR"
+      aliases: ["Washington Department of Revenue", "WA Department of Revenue", "DOR"]
+    - subject: "WA-ESD"
+      aliases: ["Employment Security Department", "WA ESD"]
+    - subject: "WA-LNI"
+      aliases: ["Labor & Industries", "L&I", "WA L&I"]
+    - subject: "IRS"
+      aliases: ["Internal Revenue Service", "Department of the Treasury"]
+
+# ---------------------------------------------------------------------------
+# Document types the classifier may return, with the descriptor each renders to
+# and the routing rule that files it.
+#
+# `path` is a template. Available tokens: {subject} {year} {month} {date}
+# {category} {client} {account}. A rule that cannot resolve every token in its
+# path falls back to review rather than guessing a folder.
+# ---------------------------------------------------------------------------
+document_types:
+
+  # --- 05 Clients & Revenue -------------------------------------------------
+  - id: "sow"
+    label: "Statement of Work"
+    descriptor: "SOW"
+    path: "05 Clients & Revenue/Clients/{client}/1 Agreement"
+    requires: ["client"]
+    retention: "contract_term_plus_6y"
+  - id: "msa"
+    label: "Master Services Agreement"
+    descriptor: "MSA"
+    path: "05 Clients & Revenue/Clients/{client}/1 Agreement"
+    requires: ["client"]
+    retention: "contract_term_plus_6y"
+    legal_weight: true
+  - id: "proposal"
+    label: "Proposal or scope document"
+    descriptor: "Proposal"
+    path: "05 Clients & Revenue/Clients/{client}/2 Proposal & Scope"
+    requires: ["client"]
+  - id: "client_invoice"
+    label: "Invoice issued to a client"
+    descriptor: "Invoice"
+    path: "05 Clients & Revenue/Clients/{client}/4 Invoices & Payments"
+    requires: ["client"]
+    retention: "7y"
+  - id: "payment_remittance"
+    label: "Payment or remittance advice from a client"
+    descriptor: "Payment"
+    path: "05 Clients & Revenue/Clients/{client}/4 Invoices & Payments"
+    requires: ["client"]
+    retention: "7y"
+  - id: "deliverable"
+    label: "Client deliverable, as delivered"
+    descriptor: "Deliverable"
+    path: "05 Clients & Revenue/Clients/{client}/5 Deliverables"
+    requires: ["client"]
+    note: "Record copy. The shared drive is the workbench; this is the record."
+  - id: "client_correspondence"
+    label: "Correspondence of record with a client"
+    descriptor: "Correspondence"
+    path: "05 Clients & Revenue/Clients/{client}/6 Correspondence of Record"
+    requires: ["client"]
+
+  # --- 03 Tax ---------------------------------------------------------------
+  - id: "tax_return"
+    label: "Filed tax return"
+    descriptor: "Return"
+    path: "03 Tax/Tax Years/{year}/1 Filed Returns"
+    requires: ["year"]
+    retention: "7y"
+    legal_weight: true
+  - id: "k1"
+    label: "Schedule K-1"
+    descriptor: "K-1"
+    path: "03 Tax/Tax Years/{year}/2 K-1s Issued"
+    requires: ["year"]
+    retention: "7y"
+    legal_weight: true
+  - id: "financial_statement"
+    label: "Financial statement as filed"
+    descriptor: "FinancialStatement"
+    path: "03 Tax/Tax Years/{year}/3 Financial Statements (as filed)"
+    requires: ["year"]
+    retention: "7y"
+  - id: "cpa_workpaper"
+    label: "CPA workpaper or adjusting entry"
+    descriptor: "Workpaper"
+    path: "03 Tax/Tax Years/{year}/4 CPA Workpapers & Adjustments"
+    requires: ["year"]
+  - id: "tax_source_doc"
+    label: "Tax source document (1099, W-2, receipts summary)"
+    descriptor: "SourceDoc"
+    path: "03 Tax/Tax Years/{year}/5 Source Documents"
+    requires: ["year"]
+    retention: "7y"
+  - id: "tax_payment"
+    label: "Tax payment or confirmation"
+    descriptor: "Payment"
+    path: "03 Tax/Tax Years/{year}/6 Payments & Confirmations"
+    requires: ["year"]
+    retention: "7y"
+  - id: "tax_notice"
+    label: "Notice or amendment from a tax authority"
+    descriptor: "Notice"
+    path: "03 Tax/Tax Years/{year}/7 Notices & Amendments"
+    requires: ["year"]
+    retention: "7y"
+    legal_weight: true
+    alert: true
+  - id: "boi_return"
+    label: "WA B&O tax return"
+    descriptor: "BO-Return"
+    path: "03 Tax/Tax Years/{year}/1 Filed Returns"
+    requires: ["year"]
+    retention: "7y"
+
+  # --- 04 Money & Banking ---------------------------------------------------
+  - id: "bank_statement"
+    label: "Bank account statement"
+    descriptor: "Statement"
+    path: "04 Money & Banking/Accounts/{subject}/2 Statements/{year}"
+    requires: ["subject", "year"]
+    retention: "7y"
+  - id: "card_statement"
+    label: "Credit card statement"
+    descriptor: "Statement"
+    path: "04 Money & Banking/Cards/{subject}/2 Statements/{year}"
+    requires: ["subject", "year"]
+    retention: "7y"
+  - id: "card_receipt"
+    label: "Receipt substantiating a card charge"
+    descriptor: "Receipt"
+    path: "04 Money & Banking/Cards/{subject}/3 Receipts & Substantiation/{year}"
+    requires: ["subject", "year"]
+    retention: "7y"
+  - id: "account_opening"
+    label: "Account opening or signer documentation"
+    descriptor: "AccountOpening"
+    path: "04 Money & Banking/Accounts/{subject}/1 Account Opening & Signers"
+    requires: ["subject"]
+    retention: "permanent"
+    legal_weight: true
+  - id: "processor_payout"
+    label: "Payment processor statement or payout"
+    descriptor: "Payout"
+    path: "04 Money & Banking/Processors/{subject}/2 Monthly Statements & Payouts"
+    requires: ["subject"]
+    retention: "7y"
+  - id: "form_1099k"
+    label: "Form 1099-K from a processor"
+    descriptor: "1099-K"
+    path: "04 Money & Banking/Processors/{subject}/3 Annual Summaries & 1099-K"
+    requires: ["subject", "year"]
+    retention: "7y"
+
+  # --- 01 Entity & Governance ----------------------------------------------
+  - id: "formation_doc"
+    label: "Formation document, operating agreement, EIN letter, Form 2553"
+    descriptor: "Formation"
+    path: "01 Entity & Governance/Formation & Ownership"
+    retention: "permanent"
+    legal_weight: true
+  - id: "name_change_doc"
+    label: "Document evidencing the Andover to Continuous Scale name change"
+    descriptor: "NameChange"
+    path: "01 Entity & Governance/Name Change & Reinstatement (ACTIVE ISSUE)"
+    retention: "permanent"
+    legal_weight: true
+    alert: true
+
+  # --- 02 Compliance --------------------------------------------------------
+  - id: "registration"
+    label: "Business license, state registration, agency account setup"
+    descriptor: "Registration"
+    path: "02 Compliance/Registrations & Licenses"
+    retention: "permanent"
+    legal_weight: true
+    note: "Registrations live in 02; the returns that follow live in 03."
+  - id: "annual_report"
+    label: "State annual report filing"
+    descriptor: "AnnualReport"
+    path: "02 Compliance/Annual Reports/{year}"
+    requires: ["year"]
+
+  # --- 06 People ------------------------------------------------------------
+  - id: "contractor_agreement"
+    label: "Contractor agreement or 1099 contractor paperwork"
+    descriptor: "ContractorAgreement"
+    path: "06 People/Contractors/{subject}/1 Agreement"
+    requires: ["subject"]
+    retention: "4y_after_end"
+    legal_weight: true
+  - id: "payroll_record"
+    label: "Payroll register, pay stub, or payroll tax filing"
+    descriptor: "Payroll"
+    path: "06 People/Payroll/{year}"
+    requires: ["year"]
+    retention: "4y"
+  - id: "retirement_plan_doc"
+    label: "Solo 401(k) plan document or statement"
+    descriptor: "RetirementPlan"
+    path: "06 People/Benefits & Retirement/{subject}"
+    requires: ["subject"]
+    retention: "permanent"
+
+  # --- 07 Insurance & Risk --------------------------------------------------
+  - id: "insurance_policy"
+    label: "Insurance policy or declarations page"
+    descriptor: "Policy"
+    path: "07 Insurance & Risk/Policies/{subject}"
+    requires: ["subject"]
+    retention: "permanent"
+    legal_weight: true
+    alert: true
+    note: >-
+      Check the named insured. If it still reads Andover Consulting, this is one
+      of the two name-change items with real consequences.
+  - id: "coi"
+    label: "Certificate of insurance"
+    descriptor: "COI"
+    path: "07 Insurance & Risk/Certificates/{year}"
+    requires: ["year"]
+
+  # --- 08 Vendors & Assets --------------------------------------------------
+  - id: "vendor_agreement"
+    label: "Vendor contract, subscription agreement, or terms"
+    descriptor: "Agreement"
+    path: "08 Vendors & Assets/Vendors/{subject}/1 Agreement"
+    requires: ["subject"]
+    retention: "contract_term_plus_6y"
+  - id: "vendor_invoice"
+    label: "Invoice or receipt from a vendor"
+    descriptor: "Invoice"
+    path: "08 Vendors & Assets/Vendors/{subject}/2 Invoices/{year}"
+    requires: ["subject", "year"]
+    retention: "7y"
+  - id: "asset_record"
+    label: "Purchase or title record for a depreciable asset"
+    descriptor: "AssetRecord"
+    path: "08 Vendors & Assets/Assets/{subject}"
+    requires: ["subject"]
+    retention: "until_disposal_plus_7y"
+
+  # --- 09 Legal Matters -----------------------------------------------------
+  - id: "legal_matter_doc"
+    label: "Filing, demand, or counsel correspondence on a contested matter"
+    descriptor: "LegalMatter"
+    path: "09 Legal Matters/Matters/{subject}"
+    requires: ["subject"]
+    retention: "legal_hold"
+    legal_weight: true
+    alert: true
+
+  # --- 10 Brand & IP --------------------------------------------------------
+  - id: "ip_registration"
+    label: "Trademark, copyright, or domain registration"
+    descriptor: "IPRegistration"
+    path: "10 Brand & IP/Registrations"
+    retention: "permanent"
+    legal_weight: true
+  - id: "sales_collateral"
+    label: "Reusable deck, one-pager, or brand asset with no client specifics"
+    descriptor: "Collateral"
+    path: "10 Brand & IP/Sales Collateral"
+    note: "If it carries a client's numbers it is a deliverable, not collateral."
+
+  # --- 11 Ops & Continuity --------------------------------------------------
+  - id: "sop"
+    label: "Standard operating procedure or runbook"
+    descriptor: "SOP"
+    path: "11 Ops & Continuity/Procedures"
+
+# ---------------------------------------------------------------------------
+# Documents the BizBox deliberately has no home for.
+# ---------------------------------------------------------------------------
+excluded_types:
+  - id: "meeting_recording"
+    label: "Meeting recording or raw transcript"
+    reason: >-
+      Meeting recordings are not records. Capture the decision in the client's
+      6 Correspondence of Record instead. Never filed, never renamed.
+  - id: "personal_record"
+    label: "Personal (non-business) record, e.g. a joint 1040"
+    reason: >-
+      Belongs in the personal Nokbox, not the BizBox. A K-1 is the exception -
+      it lives in both, so classify a K-1 as k1, not as personal.
+
+retention_policy:
+  permanent: "Keep indefinitely. Formation docs, 2553, EIN letter, operating agreement, plan docs."
+  "7y": "Practical seven-year rolling tax archive."
+  "4y": "Employment tax records: 4 years after due or paid, whichever is later."
+  "4y_after_end": "I-9 and contractor records: 3 years from hire or 1 year after exit, later of."
+  contract_term_plus_6y: "Through the contract term plus the 6-year understatement window."
+  until_disposal_plus_7y: "Property and depreciable assets: until limitations expire on the disposal year."
+  legal_hold: "A legal hold overrides all routine retention. Nothing is purged."
