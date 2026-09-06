@@ -98,6 +98,9 @@ def scan(
     limit: Optional[int] = typer.Option(None, help="Stop after N files."),
     recursive: bool = typer.Option(True, help="Descend into subfolders."),
     effort: str = typer.Option(DEFAULT_EFFORT, help="Classifier effort: low|medium|high|xhigh|max"),
+    mode: Optional[str] = typer.Option(
+        None, help="Override review mode: by_confidence | just_do_it | always_ask"
+    ),
     show_all: bool = typer.Option(False, "--all", help="Include already-conforming files."),
     out: Optional[Path] = typer.Option(None, help="Write the proposals to a JSON file."),
 ) -> None:
@@ -107,6 +110,8 @@ def scan(
     """
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     config = load_config(config_path)
+    if mode:
+        config.review.mode = mode
     storage = _build_storage(source, root, config)
 
     with Journal(db) as journal:
@@ -127,7 +132,9 @@ def scan(
     _render(proposals, show_all)
     console.print()
     _summary_line(proposals)
-    console.print(f"\n[dim]{classifier.usage_summary()}[/dim]")
+    console.print(
+        f"\n[dim]{classifier.usage_summary()} · review mode: {config.review.mode}[/dim]"
+    )
     console.print(f"Batch [bold]{batch_id}[/bold]")
 
     auto = sum(1 for p in proposals if p.disposition is Disposition.AUTO)
@@ -287,6 +294,41 @@ def batches(
                 row["source"],
                 pretty or "-",
                 str(undoable) if undoable else "-",
+            )
+        console.print(table)
+
+
+@app.command()
+def history(
+    query: Optional[str] = typer.Argument(None, help="Match part of either name."),
+    db: Path = typer.Option(DEFAULT_DB_PATH),
+    limit: int = typer.Option(50),
+) -> None:
+    """Show what each file used to be called.
+
+    The original name is recorded before any rename is applied, so it is
+    always recoverable - including for files that have since been renamed
+    again, or moved.
+    """
+    with Journal(db) as journal:
+        rows = journal.rename_history(query, limit)
+        if not rows:
+            console.print("[dim]No renames recorded yet.[/dim]")
+            raise typer.Exit(0)
+
+        table = Table(header_style="bold")
+        table.add_column("Originally", overflow="fold", max_width=32)
+        table.add_column("Now", overflow="fold", max_width=38)
+        table.add_column("Filed to", overflow="fold", max_width=34)
+        table.add_column("When", width=16)
+        table.add_column("", width=7)
+        for row in rows:
+            table.add_row(
+                row["prior_name"],
+                row["new_name"],
+                row["new_parent_path"] or "-",
+                row["applied_at"][:16].replace("T", " "),
+                Text("undone", style="dim") if row["undone_at"] else "",
             )
         console.print(table)
 

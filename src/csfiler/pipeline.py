@@ -79,7 +79,7 @@ class Pipeline:
 
     def _propose(self, ref: FileRef) -> Proposal:
         """Decide what should happen to one file."""
-        if self.config.drive.skip_conforming and is_conforming(ref.name):
+        if self.config.drive.skip_conforming and is_conforming(ref.name, self.config):
             return Proposal(
                 file=ref,
                 disposition=Disposition.SKIP_CONFORMING,
@@ -195,7 +195,9 @@ class Pipeline:
         # already claimed earlier in this batch.
         if proposed_name and proposed_path:
             taken = self._taken_names(proposed_path)
-            versioned = version_for_collision(proposed_name, taken)
+            versioned = version_for_collision(
+                proposed_name, taken, self.config.naming.sep
+            )
             if versioned != proposed_name:
                 notes.append(
                     f"A file named '{proposed_name}' already exists there; "
@@ -206,14 +208,7 @@ class Pipeline:
 
         notes.extend(facts.concerns)
 
-        if blockers:
-            disposition = Disposition.REVIEW
-        elif force_review or facts.concerns:
-            disposition = Disposition.REVIEW
-        elif facts.confidence >= self.config.confidence.auto_apply:
-            disposition = Disposition.AUTO
-        else:
-            disposition = Disposition.REVIEW
+        disposition = self._disposition_for(facts, blockers, force_review)
 
         return Proposal(
             file=ref,
@@ -226,6 +221,29 @@ class Pipeline:
             alert=doc_type.alert,
             blockers=blockers,
             notes=notes,
+        )
+
+    def _disposition_for(
+        self, facts: DocumentFacts, blockers: list[str], force_review: bool
+    ) -> Disposition:
+        """Decide whether a proposal can be applied without a human.
+
+        The mode is the firm's standing choice. Even under `just_do_it`, a
+        blocker, a flagged concern or shaky confidence still stops for a
+        human - being hands-off is not the same as being unsupervised.
+        """
+        if blockers or force_review or facts.concerns:
+            return Disposition.REVIEW
+
+        mode = self.config.review.mode
+        if mode == "always_ask":
+            return Disposition.REVIEW
+        if mode == "just_do_it":
+            return Disposition.AUTO
+        return (
+            Disposition.AUTO
+            if facts.confidence >= self.config.confidence.auto_apply
+            else Disposition.REVIEW
         )
 
     def _taken_names(self, path: str) -> set[str]:

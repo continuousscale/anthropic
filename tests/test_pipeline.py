@@ -305,3 +305,92 @@ def test_target_name_already_present_in_the_source_folder(
     assert (filed / "2026-08-14_ThirdHorizon_SOW_signed.pdf").exists()
     # The conforming file stays untouched in the inbox.
     assert (inbox / "2026-08-14_ThirdHorizon_SOW_signed.pdf").exists()
+
+
+# --- review modes ----------------------------------------------------------
+
+
+def test_just_do_it_applies_what_by_confidence_would_queue(
+    config, workspace, facts_factory, fake_client, tmp_path
+):
+    root, inbox = workspace
+    write_pdf(inbox / "a.pdf", "a document")
+
+    config.review.mode = "just_do_it"
+    pipeline, _, _ = make_pipeline(
+        config, root, [facts_factory(confidence=0.75)], fake_client, tmp_path
+    )
+    _batch, proposals = pipeline.scan("Inbox")
+    assert proposals[0].disposition is Disposition.AUTO
+
+
+def test_just_do_it_still_stops_on_low_confidence(
+    config, workspace, facts_factory, fake_client, tmp_path
+):
+    """Hands-off is not unsupervised: an uncertain file still asks."""
+    root, inbox = workspace
+    write_pdf(inbox / "a.pdf", "a blurry document")
+
+    config.review.mode = "just_do_it"
+    pipeline, _, _ = make_pipeline(
+        config, root, [facts_factory(confidence=0.30)], fake_client, tmp_path
+    )
+    _batch, proposals = pipeline.scan("Inbox")
+    assert proposals[0].disposition is Disposition.UNIDENTIFIED
+
+
+def test_just_do_it_still_stops_on_a_flagged_concern(
+    config, workspace, facts_factory, fake_client, tmp_path
+):
+    root, inbox = workspace
+    write_pdf(inbox / "a.pdf", "a document")
+
+    config.review.mode = "just_do_it"
+    pipeline, _, _ = make_pipeline(
+        config, root,
+        [facts_factory(confidence=0.99, concerns=["The date is handwritten."])],
+        fake_client, tmp_path,
+    )
+    _batch, proposals = pipeline.scan("Inbox")
+    assert proposals[0].disposition is Disposition.REVIEW
+
+
+def test_always_ask_queues_even_a_certain_file(
+    config, workspace, facts_factory, fake_client, tmp_path
+):
+    root, inbox = workspace
+    write_pdf(inbox / "a.pdf", "an unmistakable document")
+
+    config.review.mode = "always_ask"
+    pipeline, _, _ = make_pipeline(
+        config, root, [facts_factory(confidence=0.99)], fake_client, tmp_path
+    )
+    _batch, proposals = pipeline.scan("Inbox")
+    assert proposals[0].disposition is Disposition.REVIEW
+    assert proposals[0].proposed_name is not None
+
+
+# --- original names --------------------------------------------------------
+
+
+def test_the_original_name_is_always_recoverable(
+    config, workspace, facts_factory, fake_client, tmp_path
+):
+    root, inbox = workspace
+    write_pdf(inbox / "IMG_4471.pdf", "a signed SOW")
+
+    pipeline, _, journal = make_pipeline(
+        config, root, [facts_factory(is_signed=True)], fake_client, tmp_path
+    )
+    batch, proposals = pipeline.scan("Inbox")
+    pipeline.apply(proposals, batch)
+
+    history = journal.rename_history()
+    assert len(history) == 1
+    assert history[0]["prior_name"] == "IMG_4471.pdf"
+    assert history[0]["new_name"] == "2026-08-14_ThirdHorizon_SOW_signed.pdf"
+
+    # Searchable by either the old or the new name.
+    assert journal.rename_history("IMG_4471")
+    assert journal.rename_history("ThirdHorizon")
+    assert journal.original_name(history[0]["file_id"]) == "IMG_4471.pdf"

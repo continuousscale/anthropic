@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 CONFIG_FILENAME = "continuous_scale.yaml"
 
@@ -48,19 +48,112 @@ class PrivacyConfig(BaseModel):
         return [(f.name, re.compile(f.pattern)) for f in self.forbid_in_filename]
 
 
+# The separator names a firm can choose between, as words rather than symbols.
+SEPARATORS = {"dash": "-", "underscore": "_", "period": ".", "space": " "}
+
+# What a field may do when the fact it needs is not on the document.
+#   block       - refuse to build a name at all (right for a date: a wrong
+#                 date silently misfiles the document into the wrong year)
+#   skip        - leave the field out and close the gap
+#   placeholder - emit a marker, so a human can spot what is missing
+#   use_org     - fall back to our own short name (subject fields only)
+ON_MISSING = {"block", "skip", "placeholder", "use_org"}
+
+# Fields that may appear in a filename.
+NAME_FIELDS = {
+    "date",       # the document's own date
+    "year",       # the fiscal period year, which is not always the date's year
+    "subject",    # the counterparty, whoever it is
+    "client",     # the counterparty, but only if it is a configured client
+    "bank",       # the counterparty, but only if it is a financial institution
+    "account",    # the account identifier, redacted to its last four digits
+    "doc_type",   # the descriptor configured for the document type
+    "qualifier",  # signed, draft, amended
+    "entity",     # the name our own business is given on the document
+}
+
+
+class NameField(BaseModel):
+    """One component of the filename, in the order it appears."""
+
+    field: str
+    # strftime for date, "%Y" style for year, "x{last4}" for account.
+    format: str | None = None
+    style: str | None = None  # "pascal" for subject-like fields
+    on_missing: str = "skip"
+    placeholder: str = "X"
+    # Only emit this field for document types filed under a specific account,
+    # where it is what distinguishes two otherwise identical statements.
+    account_scoped_only: bool = False
+
+    @field_validator("field")
+    @classmethod
+    def _known_field(cls, value: str) -> str:
+        if value not in NAME_FIELDS:
+            raise ValueError(
+                f"Unknown name field {value!r}. Choose from: {sorted(NAME_FIELDS)}"
+            )
+        return value
+
+    @field_validator("on_missing")
+    @classmethod
+    def _known_policy(cls, value: str) -> str:
+        if value not in ON_MISSING:
+            raise ValueError(
+                f"Unknown on_missing policy {value!r}. Choose from: {sorted(ON_MISSING)}"
+            )
+        return value
+
+
 class NamingConfig(BaseModel):
-    template: str = "{date}_{subject}_{descriptor}"
-    date_format: str = "%Y-%m-%d"
-    separator: str = "_"
+    """The firm's naming convention, as an ordered list of fields.
+
+    Reordering `fields` reorders the filename; changing `separator` changes
+    what joins them. Nothing about the convention is hardcoded in the source.
+    """
+
+    separator: str = "underscore"
+    fields: list[NameField] = Field(default_factory=list)
     banned_tokens: list[str] = Field(default_factory=list)
     max_filename_length: int = 120
-    subject_style: str = "pascal"
-    descriptor_style: str = "snake_parts"
+
+    @field_validator("separator")
+    @classmethod
+    def _known_separator(cls, value: str) -> str:
+        if value not in SEPARATORS:
+            raise ValueError(
+                f"Unknown separator {value!r}. Choose from: {sorted(SEPARATORS)}"
+            )
+        return value
+
+    @property
+    def sep(self) -> str:
+        return SEPARATORS[self.separator]
 
 
 class ConfidenceConfig(BaseModel):
     auto_apply: float = 0.90
     review: float = 0.60
+
+
+# How much of the work a human sees.
+#   by_confidence - only genuinely uncertain files are queued (the default)
+#   just_do_it    - apply everything the classifier is not actively unsure of
+#   always_ask    - queue every proposal, however confident
+REVIEW_MODES = {"by_confidence", "just_do_it", "always_ask"}
+
+
+class ReviewConfig(BaseModel):
+    mode: str = "by_confidence"
+
+    @field_validator("mode")
+    @classmethod
+    def _known_mode(cls, value: str) -> str:
+        if value not in REVIEW_MODES:
+            raise ValueError(
+                f"Unknown review mode {value!r}. Choose from: {sorted(REVIEW_MODES)}"
+            )
+        return value
 
 
 class DriveConfig(BaseModel):
@@ -121,6 +214,7 @@ class Config(BaseModel):
     naming: NamingConfig = Field(default_factory=NamingConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     categories: dict[str, str] = Field(default_factory=dict)
     entities: dict[str, list[Entity]] = Field(default_factory=dict)
     document_types: list[DocumentType] = Field(default_factory=list)

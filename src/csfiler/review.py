@@ -59,6 +59,7 @@ PAGE = """<!doctype html>
             border:1px solid var(--line); background:var(--card); color:var(--fg); }}
   button.primary {{ background:var(--accent); border-color:var(--accent); color:#fff; }}
   .empty {{ text-align:center; color:var(--muted); padding:4rem 0; }}
+  .bulk {{ border-style:dashed; }}
   .banner {{ background:var(--card); border:1px solid var(--warn); color:var(--warn);
              border-radius:8px; padding:.8rem 1rem; margin-bottom:1rem; font-size:.9rem; }}
   code {{ font-size:.85rem; }}
@@ -67,8 +68,22 @@ PAGE = """<!doctype html>
   <h1>Review queue</h1>
   <p class="sub">{count} proposal(s) waiting. Everything the agent was confident
   about has already been handled — these are the ones it wants a second opinion on.</p>
+  {bulk}
   {cards}
 </div>
+"""
+
+BULK = """
+<form class="card bulk" method="post" action="/resolve-all">
+  <div class="row">
+    <strong>All {count} shown</strong>
+    <span class="pill">applies to every proposal in this queue</span>
+  </div>
+  <div class="actions">
+    <button class="primary" name="action" value="approved">Approve all</button>
+    <button name="action" value="rejected">Reject all</button>
+  </div>
+</form>
 """
 
 CARD = """
@@ -128,7 +143,11 @@ def create_app(
                     "<code>csfiler scan</code> to look for more.</p>"
                 )
             banner = f'<p class="banner">{html.escape(error)}</p>' if error else ""
-            return PAGE.format(count=len(rows), cards=banner + cards)
+            # Bulk actions only make sense once there is more than one thing
+            # to act on, and only on proposals that are ready to apply as-is.
+            ready = [r for r in rows if r["proposed_name"] and not json.loads(r["blockers"] or "[]")]
+            bulk = BULK.format(count=len(ready)) if len(ready) > 1 else ""
+            return PAGE.format(count=len(rows), bulk=banner + bulk, cards=cards)
 
     @app.post("/resolve")
     def resolve(
@@ -169,6 +188,23 @@ def create_app(
                 proposed_name=proposed_name or None,
                 proposed_path=proposed_path or None,
             )
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/resolve-all")
+    def resolve_all(action: str = Form(...)) -> RedirectResponse:
+        """Approve or reject every proposal in the queue at once.
+
+        Only proposals that are already complete are swept up: anything with an
+        unresolved blocker still needs a decision of its own, and silently
+        approving those would defeat the point of the queue.
+        """
+        with journal() as j:
+            for row in j.pending_review(batch_id):
+                if not row["proposed_name"]:
+                    continue
+                if json.loads(row["blockers"] or "[]"):
+                    continue
+                j.resolve_proposal(row["id"], action)
         return RedirectResponse("/", status_code=303)
 
     return app

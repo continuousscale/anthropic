@@ -142,3 +142,70 @@ def test_rejecting_does_not_require_a_valid_path(queued):
     )
     assert response.status_code == 303
     assert Journal(db).get_proposal(proposal_id)["review_action"] == "rejected"
+
+
+def test_bulk_approve_resolves_every_ready_proposal(tmp_path):
+    db = tmp_path / "bulk.db"
+    journal = Journal(db)
+    batch = journal.start_batch("Inbox", "scan")
+    ids = [
+        journal.record_proposal(
+            batch,
+            Proposal(
+                file=FileRef(id=f"f{i}", name=f"IMG_{i}.pdf", mime_type="application/pdf"),
+                disposition=Disposition.REVIEW,
+                facts=DocumentFacts(
+                    document_type="sow", summary="s", confidence=0.7, reasoning="r"
+                ),
+                proposed_name=f"2026-01-0{i}_ThirdHorizon_SOW.pdf",
+                proposed_path="05 Clients & Revenue/Clients/ThirdHorizon/1 Agreement",
+            ),
+        )
+        for i in range(1, 4)
+    ]
+    journal.close()
+
+    client = TestClient(create_app(db))
+    assert "Approve all" in client.get("/").text
+
+    response = client.post("/resolve-all", data={"action": "approved"}, follow_redirects=False)
+    assert response.status_code == 303
+
+    journal = Journal(db)
+    assert all(journal.get_proposal(i)["review_action"] == "approved" for i in ids)
+
+
+def test_bulk_approve_leaves_blocked_proposals_alone(tmp_path):
+    """A proposal with an unresolved blocker still needs its own decision."""
+    db = tmp_path / "bulk2.db"
+    journal = Journal(db)
+    batch = journal.start_batch("Inbox", "scan")
+    ready = journal.record_proposal(
+        batch,
+        Proposal(
+            file=FileRef(id="f1", name="ok.pdf", mime_type="application/pdf"),
+            disposition=Disposition.REVIEW,
+            facts=DocumentFacts(document_type="sow", summary="s", confidence=0.7, reasoning="r"),
+            proposed_name="2026-01-01_ThirdHorizon_SOW.pdf",
+            proposed_path="05 Clients & Revenue/Clients/ThirdHorizon/1 Agreement",
+        ),
+    )
+    blocked = journal.record_proposal(
+        batch,
+        Proposal(
+            file=FileRef(id="f2", name="unknown-client.pdf", mime_type="application/pdf"),
+            disposition=Disposition.REVIEW,
+            facts=DocumentFacts(document_type="sow", summary="s", confidence=0.7, reasoning="r"),
+            proposed_name="2026-01-01_Acme_SOW.pdf",
+            blockers=["'Acme Widgets' is not a known client."],
+        ),
+    )
+    journal.close()
+
+    TestClient(create_app(db)).post(
+        "/resolve-all", data={"action": "approved"}, follow_redirects=False
+    )
+
+    journal = Journal(db)
+    assert journal.get_proposal(ready)["review_action"] == "approved"
+    assert journal.get_proposal(blocked)["review_action"] is None

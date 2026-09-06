@@ -34,11 +34,40 @@ client, and applies the firm's naming convention either automatically or after
 approval. That is the core idea, and it is a good one. This rebuild keeps it and
 adds the following.
 
+### Kept from the original
+
+Their design is sound and most of it is reproduced directly: the agent reads
+the document rather than the filename, detects date / type / account / bank /
+client, and builds the name from a convention the firm configures — orderable
+fields, per-field formats, a choice of separator, and a per-field rule for what
+to do when a detail is missing. Both approval modes are here too ("Just Do It"
+and "Always Ask"), as is the rule that a low-confidence file stops for a human
+*even in* hands-off mode, and the guarantee that the original filename is never
+lost.
+
+The convention builder is configuration, not code, so it can express their own
+documented example exactly:
+
+```yaml
+separator: dash
+fields:
+  - {field: date,     format: "%Y-%m",  on_missing: block}
+  - {field: bank,                       on_missing: placeholder}
+  - {field: account,  format: "{last4}", on_missing: skip}
+  - {field: doc_type,                   on_missing: block}
+```
+```
+scan-final-FINAL(2).pdf  →  2026-03-Chase-4567-Statement.pdf
+```
+
+### Added
+
 | | Financial Cents | csfiler |
 |---|---|---|
 | **Scope** | Renames the file | Renames **and files** it to an exact folder |
 | **Where files live** | Inside their practice-management portal | Any Google Drive folder, including shared drives |
-| **Approval** | A global setting: "Just Do It" or "Always Ask" | Per file, by calibrated confidence — only genuinely uncertain files reach a human |
+| **Approval** | A global mode | The same two modes, plus a per-file default that queues only genuinely uncertain files |
+| **Missing detail** | Skip the field, or a placeholder | Both, plus `block` — refuse the name outright, which is the right answer for a date |
 | **Undo** | — | Every action journalled with prior name and folder; `csfiler undo <batch>` restores exactly |
 | **Collisions** | — | Versions to `_v2` rather than overwriting; never overwrites anything |
 | **Duplicates** | — | Content-hashed, so the same document is not filed twice |
@@ -53,6 +82,23 @@ registration belongs in `02 Compliance` while every return after it belongs in
 `03 Tax`; that meeting recordings are not records and are never filed; and that
 a document still naming **Andover Consulting, LLC** is correct as filed and
 belongs on the name-change register rather than being quietly "corrected".
+
+### Not reproduced
+
+Honest gaps, in rough order of how much they matter:
+
+- **It does not run the moment a file lands.** Financial Cents renames on
+  upload, inside their portal. This is a batch tool you point at a folder. A
+  polling `watch` mode would close most of the gap; a Drive push notification
+  channel would close it properly. Neither is built yet.
+- **No hosted platform around it.** Their agent sits next to the tasks, client
+  portal and document management your firm already runs on, with nothing to
+  integrate. This is a CLI you run yourself against your own Drive.
+- **No sparkle-icon UI on the file itself.** The original name is preserved and
+  queryable (`csfiler history`), but you read it from the journal rather than
+  hovering over the file in a portal.
+- **Their other AI features are out of scope** — file validation, workflow
+  templates, client emails. This does one job.
 
 ---
 
@@ -105,6 +151,30 @@ csfiler apply 20260906-141233-a1b2c3
 # 4. Reverse, if you don't like the result.
 csfiler undo 20260906-141233-a1b2c3
 ```
+
+### How much you review
+
+Set `review.mode` in the config, or override it per run:
+
+```bash
+csfiler scan "Inbox" --mode by_confidence   # default: only uncertain files queue
+csfiler scan "Inbox" --mode just_do_it      # hands-off
+csfiler scan "Inbox" --mode always_ask      # queue everything
+```
+
+Under `just_do_it`, a file the classifier is *actively unsure of* still stops
+for a human, as do flagged concerns and unresolved blockers. Hands-off is not
+unsupervised.
+
+### What was this file called before?
+
+```bash
+csfiler history                 # every rename, newest first
+csfiler history IMG_4471        # matches the old name or the new one
+```
+
+The original name is written to the journal before the rename is applied, so it
+survives later renames and moves.
 
 Useful flags:
 
@@ -177,13 +247,41 @@ The things that make this safe to point at a real Drive:
 
 ---
 
+## Where your documents go
+
+Worth being plain about, because it differs from a hosted platform:
+
+- **Document contents are sent to the Anthropic API** for classification —
+  PDFs and images natively, Office files as extracted text. That is the one
+  place a document leaves your control. Anthropic's API does not train on
+  API inputs, but this is a real data flow and your engagement letters may
+  have something to say about it.
+- **Only the first 12 pages** of a PDF are sent; identification never needs
+  more, and it keeps both cost and exposure down.
+- **Everything else stays local.** The journal, the proposals, the corrections
+  and the original filenames live in `.csfiler/journal.db` on your machine.
+  Nothing is uploaded anywhere else, and there is no csfiler server.
+- **Files move within your Drive**, under your own OAuth credentials. Nothing
+  is copied out of it.
+- **Filenames are treated as public.** They appear in link previews and share
+  notifications, so account numbers are reduced to their last four digits and
+  SSN/EIN patterns are rejected outright.
+
+If a client's documents cannot leave your infrastructure at all, this tool is
+not the right shape for that engagement.
+
 ## Configuring it
 
 Everything domain-specific is in `config/continuous_scale.yaml`. It is found by
 searching `./config/`, then `./`, then the installed package directory, then
 `~/.config/csfiler/` — or pass `--config` explicitly. It contains:
 
-- `naming` — the `{date}_{subject}_{descriptor}` template, banned words, length
+- `naming` — the ordered `fields` that make up a filename, the `separator`
+  (`dash`, `underscore`, `period`, `space`), banned words, and length cap.
+  Fields available: `date`, `year`, `subject`, `client`, `bank`, `account`,
+  `doc_type`, `qualifier`, `entity`. Each takes an `on_missing` policy of
+  `block`, `skip`, `placeholder` or `use_org`
+- `review` — `by_confidence`, `just_do_it` or `always_ask`
 - `privacy` — redaction style and the patterns forbidden in a filename
 - `confidence` — the auto-apply and review thresholds
 - `entities` — clients, banks, vendors, agencies, and their aliases
@@ -219,12 +317,13 @@ Raise `--effort` for a folder of difficult scans; it is per-run.
 
 ```bash
 pip install -e ".[dev]"
-pytest          # 37 tests, no API key or network needed
+pytest          # 59 tests, no API key or network needed
 ```
 
-The test suite drives the real pipeline, storage, naming, routing and journal
-against a temporary directory with a faked classifier, including the full
-apply-then-undo round trip.
+The test suite drives the real pipeline, storage, naming, routing, review queue
+and journal against a temporary directory with a faked classifier, including the
+full apply-then-undo round trip and the convention builder under several
+different conventions.
 
 ## Layout
 

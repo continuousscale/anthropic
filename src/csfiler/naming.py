@@ -1,15 +1,23 @@
-"""Filename construction under the BizBox convention.
+"""Filename construction from the firm's configured convention.
 
-The convention is `YYYY-MM-DD_Subject_Descriptor` with `_v2`, `_v3` appended
-only on a genuine collision. Three rules drive everything here:
+A convention is an ordered list of fields, a separator, and a per-field rule
+for what to do when the fact a field needs is not on the document. All of it
+comes from config: reordering the fields reorders the filename, and no part of
+the convention is written into this module. `_v2`, `_v3` are appended only on a
+genuine collision.
+
+Three rules drive everything here:
 
 1.  The model supplies facts; this module supplies the name. The classifier
     never returns a filename, so it cannot invent one that breaks convention.
 2.  A filename is public surface. It shows up in link previews, share
     notifications and folder listings, so no full account number, SSN or EIN
     ever reaches one.
-3.  A name that cannot be built correctly is not built at all. Missing facts
-    produce a blocker, never a placeholder like "Unknown" or today's date.
+3.  A field that cannot be filled follows its own `on_missing` policy, and
+    `block` is the honest default for anything load-bearing. A guessed date is
+    worse than no name at all, because it silently misfiles the document into
+    the wrong year - so the date field blocks rather than guessing, while a
+    missing qualifier simply drops out.
 """
 
 from __future__ import annotations
@@ -18,17 +26,37 @@ import datetime as _dt
 import re
 from pathlib import Path
 
-from .config import Config, DocumentType
+from .config import Config, DocumentType, NameField
 from .models import DocumentFacts
 
-# `2026-08-14_ThirdHorizon_SOW_signed_v2.pdf` - date, subject, then a
-# descriptor that may itself contain underscores, with an optional version.
-CONFORMING_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}"          # date
-    r"_[A-Za-z0-9&\-]+"            # subject
-    r"_[A-Za-z0-9\-]+(?:_[A-Za-z0-9\-]+)*"  # descriptor parts
-    r"(?:_v\d+)?$"                 # optional version
-)
+
+def conforming_pattern(config: Config) -> re.Pattern[str]:
+    """Build the "already named correctly" test from the configured fields.
+
+    Derived from the convention rather than hardcoded, so a firm that reorders
+    its fields or switches separator still gets correct skip-on-rerun behavior.
+    """
+    sep = re.escape(config.naming.sep)
+    chunks: list[str] = []
+    for spec in config.naming.fields:
+        if spec.field == "date":
+            fmt = spec.format or "%Y-%m-%d"
+            chunk = re.escape(fmt)
+            for code, pattern in (
+                (re.escape("%Y"), r"\d{4}"),
+                (re.escape("%m"), r"\d{2}"),
+                (re.escape("%d"), r"\d{2}"),
+            ):
+                chunk = chunk.replace(code, pattern)
+        elif spec.field == "year":
+            chunk = r"\d{4}"
+        else:
+            chunk = r"[A-Za-z0-9&.\-]+"
+        # Every field but a blocking one may be absent from a given name.
+        chunks.append(chunk if spec.on_missing == "block" else f"(?:{chunk})?")
+
+    body = f"{sep}?".join(chunks)
+    return re.compile(rf"^{body}(?:{sep}v\d+)?$")
 
 # Types whose filing is scoped to a specific account, where the redacted
 # account number is what distinguishes two otherwise identical statements.
@@ -39,13 +67,14 @@ class NameError_(ValueError):
     """Raised when a conforming name cannot be constructed from the facts."""
 
 
-def is_conforming(filename: str) -> bool:
-    """True if a filename already follows the convention.
+def is_conforming(filename: str, config: Config) -> bool:
+    """True if a filename already follows the configured convention.
 
     Used to skip files on re-runs, which is what makes the pipeline safely
-    idempotent: a second pass over the same folder is a no-op.
+    idempotent: a second pass over the same folder is a no-op and costs
+    nothing, because it never reaches the API.
     """
-    return bool(CONFORMING_RE.match(Path(filename).stem))
+    return bool(conforming_pattern(config).match(Path(filename).stem))
 
 
 def pascal(value: str) -> str:
@@ -75,7 +104,10 @@ def scrub(text: str, config: Config) -> str:
         out = pattern.sub("", out)
     for banned in config.naming.banned_tokens:
         out = re.sub(rf"(?<![A-Za-z]){re.escape(banned)}(?![A-Za-z])", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"_{2,}", "_", out).strip("_-. ")
+    sep = config.naming.sep
+    if sep.strip():
+        out = re.sub(re.escape(sep) + r"{2,}", sep, out)
+    out = out.strip("_-. ")
     return out
 
 
@@ -105,40 +137,30 @@ def resolve_subject(facts: DocumentFacts, config: Config) -> tuple[str | None, l
     return None, notes
 
 
-def build_descriptor(
-    facts: DocumentFacts, doc_type: DocumentType, config: Config
-) -> str:
-    """`SOW` + `signed` -> `SOW_signed`, plus a redacted account when scoped."""
-    parts: list[str] = [doc_type.descriptor]
+def resolve_descriptor(doc_type: DocumentType) -> str | None:
+    """The descriptor configured for this document type."""
+    return doc_type.descriptor or None
 
+
+def resolve_qualifier(facts: DocumentFacts, config: Config) -> str | None:
+    """`signed`, `draft`, `amended` - one lowercase word, or nothing."""
     qualifier = facts.qualifier
     # A signature is a fact worth carrying in the name, and the classifier
     # reports it separately from the free-text qualifier.
     if facts.is_signed and (not qualifier or "sign" not in qualifier.lower()):
         qualifier = "signed"
-    if qualifier:
-        cleaned = scrub(qualifier.strip().lower(), config)
-        cleaned = re.sub(r"[^a-z0-9]+", "", cleaned)
-        if cleaned:
-            parts.append(cleaned)
-
-    if config.privacy.redact_account_numbers and doc_type.path:
-        if any(marker in doc_type.path for marker in _ACCOUNT_SCOPED_PATH_MARKERS):
-            redacted = redact_account(facts.account_number, config.privacy.account_number_style)
-            if redacted:
-                parts.append(redacted)
-
-    return "_".join(p for p in parts if p)
+    if not qualifier:
+        return None
+    cleaned = re.sub(r"[^a-z0-9]+", "", scrub(qualifier.strip().lower(), config))
+    return cleaned or None
 
 
-def choose_date(facts: DocumentFacts, config: Config) -> tuple[str | None, list[str]]:
+def _format_date(facts: DocumentFacts, fmt: str) -> tuple[str | None, list[str]]:
     """Format the identifying date, or explain why there isn't one.
 
     Never falls back to today's date or to the file's modified time: a wrong
-    date in a filename is worse than an absent one, because it silently
-    misfiles the document into the wrong period.
+    date in a filename silently misfiles the document into the wrong period.
     """
-    notes: list[str] = []
     if not facts.document_date:
         return None, ["No date could be read from the document."]
     try:
@@ -146,9 +168,77 @@ def choose_date(facts: DocumentFacts, config: Config) -> tuple[str | None, list[
     except ValueError:
         return None, [f"Unparseable date from classifier: {facts.document_date!r}."]
 
+    notes: list[str] = []
     if parsed > _dt.date.today() + _dt.timedelta(days=1):
         notes.append(f"Date {parsed.isoformat()} is in the future; verify before filing.")
-    return parsed.strftime(config.naming.date_format), notes
+    return parsed.strftime(fmt), notes
+
+
+def _entity_in_group(facts: DocumentFacts, config: Config, group: str) -> str | None:
+    """The counterparty token, but only if it belongs to the named group."""
+    entity = config.resolve_entity(facts.counterparty)
+    if entity and config.entity_group(entity.subject) == group:
+        return entity.subject
+    return None
+
+
+def resolve_field(
+    spec: "NameField",
+    facts: DocumentFacts,
+    doc_type: DocumentType,
+    config: Config,
+) -> tuple[str | None, list[str]]:
+    """Produce one field's text, or None when the fact is not available."""
+    notes: list[str] = []
+    name = spec.field
+
+    if name == "date":
+        return _format_date(facts, spec.format or "%Y-%m-%d")
+
+    if name == "year":
+        year = facts.period_year
+        if not year and facts.document_date:
+            try:
+                year = _dt.date.fromisoformat(facts.document_date).year
+            except ValueError:
+                year = None
+        return (str(year) if year else None), notes
+
+    if name == "subject":
+        subject, subject_notes = resolve_subject(facts, config)
+        return subject, subject_notes
+
+    if name == "client":
+        return _entity_in_group(facts, config, "clients"), notes
+
+    if name == "bank":
+        return _entity_in_group(facts, config, "financial_institutions"), notes
+
+    if name == "account":
+        if spec.account_scoped_only and not _is_account_scoped(doc_type):
+            return None, notes
+        if not config.privacy.redact_account_numbers:
+            return (facts.account_number or None), notes
+        return redact_account(
+            facts.account_number, spec.format or config.privacy.account_number_style
+        ), notes
+
+    if name == "doc_type":
+        return resolve_descriptor(doc_type), notes
+
+    if name == "qualifier":
+        return resolve_qualifier(facts, config), notes
+
+    if name == "entity":
+        return (pascal(facts.entity_named) if facts.entity_named else None), notes
+
+    return None, [f"No resolver for name field {name!r}."]
+
+
+def _is_account_scoped(doc_type: DocumentType) -> bool:
+    return bool(doc_type.path) and any(
+        marker in doc_type.path for marker in _ACCOUNT_SCOPED_PATH_MARKERS
+    )
 
 
 def build_name(
@@ -157,34 +247,43 @@ def build_name(
     config: Config,
     original_filename: str,
 ) -> tuple[str, list[str]]:
-    """Render the full filename, extension included.
+    """Render the filename by walking the configured fields in order.
 
-    Raises NameError_ when a required component is missing, so the caller can
-    turn that into a review blocker instead of writing a malformed name.
+    Each field that cannot be filled applies its own `on_missing` policy, so a
+    firm decides per field whether a gap blocks the name, is skipped, or is
+    marked with a placeholder. Raises NameError_ when a `block` field is
+    missing, which the caller turns into a review blocker.
     """
     notes: list[str] = []
+    parts: list[str] = []
 
-    date_str, date_notes = choose_date(facts, config)
-    notes.extend(date_notes)
-    if not date_str:
-        raise NameError_("no usable document date")
+    for spec in config.naming.fields:
+        value, field_notes = resolve_field(spec, facts, doc_type, config)
+        notes.extend(field_notes)
 
-    subject, subject_notes = resolve_subject(facts, config)
-    notes.extend(subject_notes)
-    if not subject:
-        # The convention has three slots; a document with no counterparty uses
-        # our own short name, which is how governance documents are named.
-        subject = config.organization.short_name
-        notes.append(f"No counterparty on the document; used '{subject}'.")
+        if value:
+            parts.append(str(value))
+            continue
 
-    descriptor = build_descriptor(facts, doc_type, config)
-    if not descriptor:
-        raise NameError_("could not build a descriptor")
+        if spec.on_missing == "block":
+            raise NameError_(f"no {spec.field} available")
+        if spec.on_missing == "use_org":
+            parts.append(config.organization.short_name)
+            notes.append(
+                f"No {spec.field} on the document; used "
+                f"'{config.organization.short_name}'."
+            )
+        elif spec.on_missing == "placeholder":
+            parts.append(spec.placeholder)
+            notes.append(f"No {spec.field} on the document; marked '{spec.placeholder}'.")
+        # "skip" contributes nothing and closes the gap.
 
-    stem = config.naming.template.format(
-        date=date_str, subject=subject, descriptor=descriptor
-    )
-    stem = scrub(stem, config)
+    if not parts:
+        raise NameError_("no fields could be filled")
+
+    stem = scrub(config.naming.sep.join(parts), config)
+    if not stem:
+        raise NameError_("the name was empty after scrubbing")
 
     ext = Path(original_filename).suffix.lower()
     max_stem = config.naming.max_filename_length - len(ext)
@@ -202,7 +301,7 @@ def build_name(
     return name, notes
 
 
-def version_for_collision(name: str, taken: set[str]) -> str:
+def version_for_collision(name: str, taken: set[str], sep: str = "_") -> str:
     """Append `_v2`, `_v3`, ... until the name is free in its destination.
 
     The convention's version suffix exists for exactly this, and it is the
@@ -214,8 +313,8 @@ def version_for_collision(name: str, taken: set[str]) -> str:
     path = Path(name)
     stem, ext = path.stem, path.suffix
 
-    base = re.sub(r"_v\d+$", "", stem)
+    base = re.sub(re.escape(sep) + r"v\d+$", "", stem)
     version = 2
-    while f"{base}_v{version}{ext}" in taken:
+    while f"{base}{sep}v{version}{ext}" in taken:
         version += 1
-    return f"{base}_v{version}{ext}"
+    return f"{base}{sep}v{version}{ext}"

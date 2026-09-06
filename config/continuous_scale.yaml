@@ -40,17 +40,67 @@ drive:
   skip_conforming: true
 
 naming:
-  # YYYY-MM-DD_Subject_Descriptor  (+ _v2, _v3 only on genuine collision)
-  template: "{date}_{subject}_{descriptor}"
-  date_format: "%Y-%m-%d"
-  separator: "_"
+  # The convention is an ordered list of fields. Reorder `fields` and the
+  # filename reorders with it; change `separator` and everything rejoins.
+  # Nothing about the convention is hardcoded in the Python source.
+  #
+  # As configured below this produces the BizBox convention:
+  #   2026-08-14_ThirdHorizon_SOW_signed.pdf
+  #   2026-08-31_Mercury_Statement_x4471.pdf
+  #
+  # separator: dash | underscore | period | space
+  separator: "underscore"
+
   # Words banned outright by the BizBox convention.
   banned_tokens: ["final", "FINAL", "final2", "finalv2", "latest", "new", "copy", "untitled"]
   max_filename_length: 120
-  # Subject is rendered without spaces in PascalCase: "Third Horizon" -> "ThirdHorizon"
-  subject_style: "pascal"
-  # Descriptor keeps underscores between parts: "SOW_signed"
-  descriptor_style: "snake_parts"
+
+  # Available fields:
+  #   date       the document's own date          format: strftime
+  #   year       the fiscal period year, which is not always the date's year
+  #   subject    the counterparty, whoever it is
+  #   client     the counterparty, only if it is a configured client
+  #   bank       the counterparty, only if it is a financial institution
+  #   account    the account identifier, redacted   format: "x{last4}"
+  #   doc_type   the descriptor set on the document type
+  #   qualifier  signed / draft / amended
+  #   entity     the name our own business is given on the document
+  #
+  # on_missing: block | skip | placeholder | use_org
+  #   block        refuse to build a name at all
+  #   skip         leave the field out and close the gap
+  #   placeholder  emit `placeholder` so a human can spot what is missing
+  #   use_org      fall back to our own short name
+  fields:
+    - field: date
+      format: "%Y-%m-%d"
+      # A guessed date silently misfiles a document into the wrong year, which
+      # is worse than not filing it. So a missing date blocks the name.
+      on_missing: block
+
+    - field: subject
+      # Governance and IP documents have no counterparty; they take our name.
+      on_missing: use_org
+
+    - field: doc_type
+      on_missing: block
+
+    - field: qualifier
+      on_missing: skip
+
+    - field: account
+      format: "x{last4}"
+      on_missing: skip
+      # Only for documents filed under a specific account, where the last four
+      # digits are what distinguish two otherwise identical statements.
+      account_scoped_only: true
+
+# How much of the work a human sees.
+#   by_confidence  only genuinely uncertain files are queued (recommended)
+#   just_do_it     apply everything the classifier is not actively unsure of
+#   always_ask     queue every proposal, however confident
+review:
+  mode: "by_confidence"
 
 privacy:
   # Filenames are shown in link previews, notification emails and shared folder

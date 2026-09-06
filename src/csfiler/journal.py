@@ -248,6 +248,34 @@ class Journal:
             )
         )
 
+    def rename_history(
+        self, query: str | None = None, limit: int = 50
+    ) -> list[sqlite3.Row]:
+        """Every rename recorded, newest first, with its original name.
+
+        The original name is never lost: it is written here before the rename
+        is applied, so it survives even if the file is renamed again later.
+        `query` matches either the original or the current name.
+        """
+        sql = "SELECT * FROM actions"
+        params: list[Any] = []
+        if query:
+            sql += " WHERE prior_name LIKE ? OR new_name LIKE ?"
+            params += [f"%{query}%", f"%{query}%"]
+        sql += " ORDER BY applied_at DESC LIMIT ?"
+        params.append(limit)
+        return list(self.conn.execute(sql, params))
+
+    def original_name(self, file_id: str) -> str | None:
+        """The name a file had before this agent first touched it."""
+        cur = self.conn.execute(
+            "SELECT prior_name FROM actions WHERE file_id=? "
+            "ORDER BY applied_at ASC LIMIT 1",
+            (file_id,),
+        )
+        row = cur.fetchone()
+        return row["prior_name"] if row else None
+
     def mark_undone(self, action_id: str) -> None:
         self.conn.execute(
             "UPDATE actions SET undone_at=? WHERE id=?", (_now(), action_id)
